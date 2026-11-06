@@ -13,9 +13,66 @@
 #import "DOActionMenuButton.h"
 #import "DOUpdateViewController.h"
 #import "DOLogCrashViewController.h"
+#import "DOPSListController.h"
+#import "DOThemeManager.h"
 #import <pthread.h>
 #import <sys/sysctl.h>
 #import <libjailbreak/libjailbreak.h>
+
+static NSString *DOWallpaperPath(void) {
+    return [NSHomeDirectory() stringByAppendingPathComponent:@"Library/dopamine-wallpaper.jpg"];
+}
+
+@interface DOWallpaperController : DOPSListController <UIImagePickerControllerDelegate, UINavigationControllerDelegate>
+@property (nonatomic, copy) void (^changed)(void);
+@end
+@implementation DOWallpaperController
+- (id)specifiers {
+    if (!_specifiers) {
+        NSMutableArray *items = [NSMutableArray array];
+        PSSpecifier *header = [PSSpecifier emptyGroupSpecifier];
+        [header setProperty:@"DOHeaderCell" forKey:@"headerCellClass"];
+        [header setProperty:@"更换壁纸" forKey:@"title"];
+        [items addObject:header];
+        PSSpecifier *choose = [PSSpecifier preferenceSpecifierNamed:@"选择照片" target:self set:NULL get:NULL detail:nil cell:PSButtonCell edit:nil];
+        choose.buttonAction = @selector(selectImage);
+        [items addObject:choose];
+        NSArray *titles = @[@"背景透明度", @"背景模糊度"];
+        NSArray *keys = @[@"DOWallpaperOpacity", @"DOWallpaperBlur"];
+        for (NSUInteger i = 0; i < titles.count; i++) {
+            [items addObject:[PSSpecifier groupSpecifierWithName:titles[i]]];
+            PSSpecifier *slider = [PSSpecifier preferenceSpecifierNamed:nil target:self set:@selector(setWallpaperValue:specifier:) get:@selector(wallpaperValue:) detail:nil cell:PSSliderCell edit:nil];
+            [slider setProperty:keys[i] forKey:@"key"];
+            [slider setProperty:@0 forKey:@"min"];
+            [slider setProperty:@1 forKey:@"max"];
+            [slider setProperty:@YES forKey:@"isContinuous"];
+            [items addObject:slider];
+        }
+        [items addObject:[PSSpecifier emptyGroupSpecifier]];
+        PSSpecifier *reset = [PSSpecifier preferenceSpecifierNamed:@"恢复默认背景" target:self set:NULL get:NULL detail:nil cell:PSButtonCell edit:nil];
+        reset.buttonAction = @selector(resetImage);
+        [items addObject:reset];
+        _specifiers = items;
+    }
+    return _specifiers;
+}
+- (id)wallpaperValue:(PSSpecifier *)specifier {
+    NSString *key = [specifier propertyForKey:@"key"];
+    return [NSUserDefaults.standardUserDefaults objectForKey:key] ?: ([key isEqualToString:@"DOWallpaperOpacity"] ? @1 : @0);
+}
+- (void)setWallpaperValue:(NSNumber *)value specifier:(PSSpecifier *)specifier {
+    [NSUserDefaults.standardUserDefaults setObject:value forKey:[specifier propertyForKey:@"key"]];
+    if (self.changed) self.changed();
+}
+- (void)selectImage { UIImagePickerController *picker = [[UIImagePickerController alloc] init]; picker.sourceType = UIImagePickerControllerSourceTypePhotoLibrary; picker.delegate = self; [self presentViewController:picker animated:YES completion:nil]; }
+- (void)imagePickerControllerDidCancel:(UIImagePickerController *)picker { [picker dismissViewControllerAnimated:YES completion:nil]; }
+- (void)imagePickerController:(UIImagePickerController *)picker didFinishPickingMediaWithInfo:(NSDictionary<UIImagePickerControllerInfoKey,id> *)info {
+    UIImage *image = info[UIImagePickerControllerOriginalImage];
+    [UIImageJPEGRepresentation(image, 0.9) writeToFile:DOWallpaperPath() atomically:YES];
+    if (self.changed) self.changed(); [picker dismissViewControllerAnimated:YES completion:nil];
+}
+- (void)resetImage { [[NSFileManager defaultManager] removeItemAtPath:DOWallpaperPath() error:nil]; if (self.changed) self.changed(); }
+@end
 
 @interface DOMainViewController ()
 
@@ -23,6 +80,10 @@
 @property NSArray<NSLayoutConstraint *> *jailbreakButtonConstraints;
 @property DOActionMenuButton *updateButton;
 @property(nonatomic) BOOL hideStatusBar;
+@property(nonatomic) UIView *layoutView;
+@property(nonatomic) UIButton *layoutStatusButton;
+@property(nonatomic) UIImageView *wallpaperView;
+@property(nonatomic) UIVisualEffectView *wallpaperBlur;
 @property(nonatomic) BOOL hideHomeIndicator;
 
 @end
@@ -162,6 +223,16 @@
         
     }]];
     self.jailbreakBtn.enabled = !isJailbroken && isSupported;
+    if (isSupported) {
+        stackView.hidden = YES;
+        self.jailbreakBtn.hidden = YES;
+        [self setupCustomLayoutWithActions:actionView.actions startAction:^{
+            stackView.hidden = NO;
+            self.jailbreakBtn.hidden = NO;
+            self.layoutView.hidden = YES;
+            [self.jailbreakBtn.button sendActionsForControlEvents:UIControlEventTouchUpInside];
+        }];
+    }
 
     [self.view addSubview:self.jailbreakBtn];
 
@@ -188,6 +259,51 @@
     });
 }
 
+- (void)refreshWallpaper {
+    self.wallpaperView.image = [UIImage imageWithContentsOfFile:DOWallpaperPath()] ?: [[[DOThemeManager sharedInstance] enabledTheme] image];
+    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+    id opacity = [defaults objectForKey:@"DOWallpaperOpacity"];
+    self.wallpaperView.alpha = opacity ? [opacity floatValue] : 1;
+    self.wallpaperBlur.alpha = [defaults floatForKey:@"DOWallpaperBlur"];
+}
+
+- (void)showWallpaperSettings {
+    DOWallpaperController *controller = [[DOWallpaperController alloc] init];
+    __weak typeof(self) weakSelf = self;
+    controller.changed = ^{ [weakSelf refreshWallpaper]; };
+    [self.navigationController pushViewController:controller animated:YES];
+}
+
+- (void)setupCustomLayoutWithActions:(NSArray<UIAction *> *)actions startAction:(void (^)(void))startAction {
+    UIView *page = [[UIView alloc] init]; page.translatesAutoresizingMaskIntoConstraints = NO; page.backgroundColor = [UIColor colorWithWhite:0.15 alpha:1]; [self.view addSubview:page]; self.layoutView = page;
+    [NSLayoutConstraint activateConstraints:@[[page.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor], [page.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor], [page.topAnchor constraintEqualToAnchor:self.view.topAnchor], [page.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor]]];
+    UIImageView *wallpaper = [[UIImageView alloc] init]; wallpaper.contentMode = UIViewContentModeScaleAspectFill; wallpaper.clipsToBounds = YES; wallpaper.translatesAutoresizingMaskIntoConstraints = NO; [page addSubview:wallpaper]; self.wallpaperView = wallpaper;
+    UIVisualEffectView *blur = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleDark]]; blur.translatesAutoresizingMaskIntoConstraints = NO; [page addSubview:blur]; self.wallpaperBlur = blur;
+    UIView *shade = [[UIView alloc] init]; shade.backgroundColor = [UIColor colorWithWhite:0 alpha:0.28]; shade.translatesAutoresizingMaskIntoConstraints = NO; [page addSubview:shade];
+    for (UIView *v in @[wallpaper, blur, shade]) [NSLayoutConstraint activateConstraints:@[[v.leadingAnchor constraintEqualToAnchor:page.leadingAnchor], [v.trailingAnchor constraintEqualToAnchor:page.trailingAnchor], [v.topAnchor constraintEqualToAnchor:page.topAnchor], [v.bottomAnchor constraintEqualToAnchor:page.bottomAnchor]]];
+    [self refreshWallpaper];
+    UILabel *title = [[UILabel alloc] init]; title.text = @"Dopamine"; title.font = [UIFont systemFontOfSize:36 weight:UIFontWeightSemibold]; title.textAlignment = NSTextAlignmentCenter; title.textColor = UIColor.whiteColor; title.translatesAutoresizingMaskIntoConstraints = NO; [page addSubview:title];
+    UILabel *subtitle = [[UILabel alloc] init]; subtitle.text = [[DOEnvironmentManager sharedManager] versionSupportString]; subtitle.font = [UIFont systemFontOfSize:15]; subtitle.textColor = [UIColor colorWithWhite:1 alpha:0.8]; subtitle.textAlignment = NSTextAlignmentCenter; subtitle.translatesAutoresizingMaskIntoConstraints = NO; [page addSubview:subtitle];
+    [NSLayoutConstraint activateConstraints:@[[title.centerXAnchor constraintEqualToAnchor:page.centerXAnchor], [title.centerYAnchor constraintEqualToAnchor:page.safeAreaLayoutGuide.topAnchor constant:70], [subtitle.centerXAnchor constraintEqualToAnchor:page.centerXAnchor], [subtitle.topAnchor constraintEqualToAnchor:title.bottomAnchor constant:6]]];
+    UIStackView *menu = [[UIStackView alloc] init]; menu.axis = UILayoutConstraintAxisVertical; menu.spacing = 0; menu.distribution = UIStackViewDistributionFillEqually; menu.translatesAutoresizingMaskIntoConstraints = NO; [page addSubview:menu];
+    [NSLayoutConstraint activateConstraints:@[[menu.leadingAnchor constraintEqualToAnchor:page.safeAreaLayoutGuide.leadingAnchor constant:22], [menu.bottomAnchor constraintEqualToAnchor:page.safeAreaLayoutGuide.bottomAnchor constant:-28], [menu.widthAnchor constraintEqualToConstant:165], [menu.heightAnchor constraintEqualToConstant:288]]];
+    UIAction *wall = [UIAction actionWithTitle:@"更换壁纸" image:nil identifier:nil handler:^(__kindof UIAction *a) { [self showWallpaperSettings]; }];
+    BOOL jailbroken = !self.jailbreakBtn.enabled;
+    NSString *statusTitle = jailbroken ? @"已经越狱" : [self jailbreakButtonTitle];
+    if (!jailbroken && [statusTitle isEqualToString:DOLocalizedString(@"Button_Jailbreak_Title")]) statusTitle = @"去越狱";
+    UIAction *status = [UIAction actionWithTitle:statusTitle image:nil identifier:nil handler:^(__kindof UIAction *a) { startAction(); }];
+    NSArray *items = @[actions[1], actions[2], wall, actions[3], actions[0], status];
+    NSArray *titles = @[@"刷新桌面", @"重启空间", @"更换壁纸", @"关于项目", @"应用设置", statusTitle];
+    for (NSUInteger i=0; i<items.count; i++) {
+        UIAction *action = items[i]; UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
+        [button addAction:action forControlEvents:UIControlEventTouchUpInside];
+        UIButtonConfiguration *config = [UIButtonConfiguration plainButtonConfiguration]; config.title = titles[i]; config.baseForegroundColor = UIColor.whiteColor; config.contentInsets = NSDirectionalEdgeInsetsMake(0, 4, 0, 4); button.configuration = config; button.contentHorizontalAlignment = UIControlContentHorizontalAlignmentLeft;
+        if (i == 1 || i == 0) button.enabled = [self actionMenuActionIsEnabled:action];
+        if (i == 5) { button.userInteractionEnabled = !jailbroken; if (jailbroken) button.accessibilityTraits |= UIAccessibilityTraitNotEnabled; self.layoutStatusButton = button; }
+        [menu addArrangedSubview:button];
+    }
+}
+
 - (NSString *)jailbreakButtonTitle
 {
     BOOL isJailbroken = [[DOEnvironmentManager sharedManager] isJailbroken];
@@ -208,7 +324,15 @@
 - (void)viewWillAppear:(BOOL)animated
 {
     [super viewWillAppear:animated];
-    [self.jailbreakBtn.button setTitle:[self jailbreakButtonTitle] forState:UIControlStateNormal];
+    NSString *title = [self jailbreakButtonTitle];
+    [self.jailbreakBtn.button setTitle:title forState:UIControlStateNormal];
+    if (self.layoutStatusButton) {
+        if (!self.jailbreakBtn.enabled) title = @"已经越狱";
+        else if ([title isEqualToString:DOLocalizedString(@"Button_Jailbreak_Title")]) title = @"去越狱";
+        UIButtonConfiguration *configuration = self.layoutStatusButton.configuration;
+        configuration.title = title;
+        self.layoutStatusButton.configuration = configuration;
+    }
 }
 
 - (void)startJailbreak
